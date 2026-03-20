@@ -3,11 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:notification_listener_service/notification_event.dart';
 import 'package:notification_listener_service/notification_listener_service.dart';
 
 import 'data/app_database.dart';
-import 'domain/payment_parser.dart';
 
 class RirikoApp extends StatelessWidget {
   const RirikoApp({super.key});
@@ -37,9 +35,9 @@ class AutoBookkeepingPage extends StatefulWidget {
   State<AutoBookkeepingPage> createState() => _AutoBookkeepingPageState();
 }
 
-class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
+class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
+    with WidgetsBindingObserver {
   AppDatabase? _database;
-  StreamSubscription<ServiceNotificationEvent>? _subscription;
   final _currencyFormatter = NumberFormat.currency(locale: 'zh_CN', symbol: '¥');
   final _dateTimeFormatter = DateFormat('MM-dd HH:mm');
 
@@ -56,6 +54,7 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _bootstrap();
   }
 
@@ -83,12 +82,6 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
       granted = await NotificationListenerService.requestPermission();
     }
 
-    if (_subscription == null && granted) {
-      _subscription = NotificationListenerService.notificationsStream.listen(
-        _onNotification,
-      );
-    }
-
     if (!mounted) {
       return;
     }
@@ -99,36 +92,11 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
     });
   }
 
-  Future<void> _onNotification(ServiceNotificationEvent event) async {
-    final database = _database;
-    if (database == null) {
-      return;
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_reloadData());
     }
-
-    final title = (event.title ?? '未知标题').trim();
-    final content = (event.content ?? '').trim();
-    final packageName = (event.packageName ?? '未知应用').trim();
-    final happenedAt = DateTime.now();
-    final displayTime = DateFormat('yyyy-MM-dd HH:mm:ss').format(happenedAt);
-
-    await database.insertNotificationLog(
-      title: title,
-      content: content,
-      packageName: packageName,
-      time: displayTime,
-    );
-
-    final transaction = PaymentParser.parse(
-      packageName: packageName,
-      title: title,
-      content: content,
-      happenedAt: happenedAt,
-    );
-    if (transaction != null) {
-      await database.insertTransaction(transaction);
-    }
-
-    await _reloadData();
   }
 
   Future<void> _reloadData() async {
@@ -225,7 +193,7 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
         const SizedBox(height: 8),
         if (_transactions.isEmpty)
           const _EmptyHint(
-            text: '还没有识别到账单。\n打开权限后，用微信或支付宝完成一笔支付/收款试试看。',
+            text: '还没有识别到账单。\n授予通知权限后，即使不打开 Ririko，也会在后台记录微信、支付宝和银行卡动账通知。',
           )
         else
           ..._transactions.map(_buildTransactionTile),
@@ -285,7 +253,7 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
     if (_logs.isEmpty) {
       return const Center(
         child: _EmptyHint(
-          text: '暂无通知记录。\n监听权限打开后，收到支付通知就会出现在这里。',
+          text: '暂无通知记录。\n授权完成后，后台收到的支付通知会自动出现在这里。',
         ),
       );
     }
@@ -365,7 +333,7 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage> {
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
     _database?.close();
     super.dispose();
   }
@@ -481,7 +449,7 @@ class _PermissionView extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             const Text(
-              '自动记账依赖系统通知。请在系统设置中允许本应用读取通知，再回来重新检查权限。',
+              '自动记账依赖 Android 的通知访问权限。首次授权后，Ririko 的原生监听服务可以在后台持续处理动账通知，不需要你显式打开 App。',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
