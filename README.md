@@ -1,3 +1,5 @@
 # Ririko
 
-uh, maybe the plan of building this project should be delayed until the winter vacation.
++ 不管来源是什么，都可以从微信获取这个支付的消息
++ 支付宝消息？
++ 
