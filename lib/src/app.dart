@@ -1,9 +1,11 @@
 import 'dart:async';
 
+import 'package:excel/excel.dart' as xlsx;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:notification_listener_service/notification_listener_service.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'data/app_database.dart';
 
@@ -40,6 +42,8 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
   AppDatabase? _database;
   final _currencyFormatter = NumberFormat.currency(locale: 'zh_CN', symbol: '¥');
   final _dateTimeFormatter = DateFormat('MM-dd HH:mm');
+  final _dayFormatter = DateFormat('yyyy-MM-dd EEE', 'zh_CN');
+  final _timeFormatter = DateFormat('HH:mm');
 
   List<Map<String, dynamic>> _logs = const [];
   List<Map<String, dynamic>> _transactions = const [];
@@ -48,6 +52,7 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
   bool _isPermissionGranted = false;
   bool _isLoading = true;
   bool _listenerAvailable = false;
+  bool _isExporting = false;
 
   bool get _isAndroid => !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
@@ -151,6 +156,17 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
               onPressed: _reloadData,
               icon: const Icon(Icons.refresh),
             ),
+            IconButton(
+              tooltip: '导出 xlsx',
+              onPressed: _isExporting ? null : _exportXlsx,
+              icon: _isExporting
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.file_download_outlined),
+            ),
           ],
           bottom: const TabBar(
             tabs: [
@@ -187,7 +203,14 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
         ),
         const SizedBox(height: 16),
         Text(
-          '自动识别账单',
+          '每日支出明细',
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        const SizedBox(height: 8),
+        _buildDailyExpenseSection(),
+        const SizedBox(height: 16),
+        Text(
+          '全部账单',
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: 8),
@@ -208,11 +231,13 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
     final counterparty = item['counterparty'] as String?;
     final category = item['category'] as String? ?? 'other';
     final title = item['sourceTitle'] as String? ?? '';
+    final note = item['note'] as String?;
     final subtitleParts = <String>[
       item['sourceApp'] as String? ?? '',
       if (counterparty != null && counterparty.isNotEmpty) counterparty,
       _categoryLabel(category),
     ]..removeWhere((part) => part.isEmpty);
+    final titleLine = note == null || note.isEmpty ? title : '$title · $note';
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -235,17 +260,156 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
         subtitle: Padding(
           padding: const EdgeInsets.only(top: 6),
           child: Text(
-            '${subtitleParts.join(' · ')}\n$title',
+            '${subtitleParts.join(' · ')}\n$titleLine',
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
           ),
         ),
-        trailing: Text(
-          happenedAt == null ? '--' : _dateTimeFormatter.format(happenedAt),
-          style: Theme.of(context).textTheme.bodySmall,
+        trailing: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Text(
+              happenedAt == null ? '--' : _dateTimeFormatter.format(happenedAt),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 6),
+            const Icon(Icons.edit_outlined, size: 18),
+          ],
         ),
         isThreeLine: true,
+        onTap: () => _openEditTransaction(item),
       ),
+    );
+  }
+
+  Widget _buildDailyExpenseSection() {
+    final grouped = <DateTime, List<Map<String, dynamic>>>{};
+
+    for (final item in _transactions) {
+      if (item['direction'] != 'expense') {
+        continue;
+      }
+      final happenedAt = _parseDateTime(item['happenedAt']);
+      if (happenedAt == null) {
+        continue;
+      }
+      final dayKey = DateTime(happenedAt.year, happenedAt.month, happenedAt.day);
+      grouped.putIfAbsent(dayKey, () => []).add(item);
+    }
+
+    if (grouped.isEmpty) {
+      return const _EmptyHint(text: '暂无支出记录。');
+    }
+
+    final days = grouped.keys.toList()..sort((a, b) => b.compareTo(a));
+    return Column(
+      children: [
+        for (final day in days)
+          _buildDailyExpenseCard(day: day, items: grouped[day]!),
+      ],
+    );
+  }
+
+  Widget _buildDailyExpenseCard({
+    required DateTime day,
+    required List<Map<String, dynamic>> items,
+  }) {
+    final sortedItems = [...items]
+      ..sort(
+        (a, b) => (_parseDateTime(b['happenedAt']) ?? DateTime(1970)).compareTo(
+          _parseDateTime(a['happenedAt']) ?? DateTime(1970),
+        ),
+      );
+    final total = sortedItems.fold<double>(
+      0,
+      (sum, item) => sum + ((item['amount'] as num?)?.toDouble() ?? 0),
+    );
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _dayFormatter.format(day),
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                Text(
+                  '共 ${_currencyFormatter.format(total)}',
+                  style: const TextStyle(
+                    color: Color(0xFFB6533A),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            for (var index = 0; index < sortedItems.length; index++) ...[
+              _buildDailyExpenseRow(sortedItems[index]),
+              if (index != sortedItems.length - 1) const Divider(height: 14),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDailyExpenseRow(Map<String, dynamic> item) {
+    final happenedAt = _parseDateTime(item['happenedAt']);
+    final amount = (item['amount'] as num?)?.toDouble() ?? 0;
+    final title = (item['sourceTitle'] as String? ?? '').trim();
+    final counterparty = (item['counterparty'] as String? ?? '').trim();
+    final category = _categoryLabel(item['category'] as String? ?? 'other');
+    final details = <String>[
+      category,
+      if (counterparty.isNotEmpty) counterparty,
+    ];
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 52,
+          child: Text(
+            happenedAt == null ? '--' : _timeFormatter.format(happenedAt),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title.isEmpty ? '未命名支出' : title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              Text(
+                details.join(' · '),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          '-${_currencyFormatter.format(amount)}',
+          style: const TextStyle(
+            color: Color(0xFFB6533A),
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+      ],
     );
   }
 
@@ -325,10 +489,185 @@ class _AutoBookkeepingPageState extends State<AutoBookkeepingPage>
       title: result.title,
       category: result.category,
       counterparty: result.counterparty,
+      content: result.content,
       note: result.note,
       happenedAt: result.happenedAt,
     );
     await _reloadData();
+  }
+
+  Future<void> _openEditTransaction(Map<String, dynamic> item) async {
+    final database = _database;
+    if (database == null) {
+      return;
+    }
+
+    final id = (item['id'] as num?)?.toInt();
+    if (id == null) {
+      _showMessage('当前账单无法编辑：缺少 id');
+      return;
+    }
+
+    final result = await showModalBottomSheet<_ManualEntryResult>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) => _ManualEntrySheet(
+        sheetTitle: '编辑账单',
+        submitLabel: '保存修改',
+        initial: _ManualEntryInitial(
+          amount: (item['amount'] as num?)?.toDouble() ?? 0,
+          direction: item['direction'] as String? ?? 'expense',
+          title: item['sourceTitle'] as String? ?? '',
+          content: item['sourceContent'] as String? ?? '',
+          category: item['category'] as String? ?? 'other',
+          happenedAt: _parseDateTime(item['happenedAt']) ?? DateTime.now(),
+          counterparty: item['counterparty'] as String?,
+          note: item['note'] as String?,
+        ),
+      ),
+    );
+
+    if (result == null) {
+      return;
+    }
+
+    await database.updateTransaction(
+      id: id,
+      amount: result.amount,
+      direction: result.direction,
+      title: result.title,
+      content: result.content,
+      category: result.category,
+      happenedAt: result.happenedAt,
+      counterparty: result.counterparty,
+      note: result.note,
+    );
+    await _reloadData();
+    _showMessage('账单已更新');
+  }
+
+  Future<void> _exportXlsx() async {
+    final database = _database;
+    if (database == null || _isExporting) {
+      return;
+    }
+
+    setState(() {
+      _isExporting = true;
+    });
+
+    try {
+      final rows = await database.getAllTransactions();
+      if (rows.isEmpty) {
+        _showMessage('暂无账单可导出');
+        return;
+      }
+
+      final workbook = xlsx.Excel.createExcel();
+      final defaultSheet = workbook.getDefaultSheet();
+      const sheetName = '账单';
+      if (defaultSheet != null && defaultSheet != sheetName) {
+        workbook.rename(defaultSheet, sheetName);
+      }
+      final sheet = workbook[sheetName];
+
+      sheet.appendRow([
+        xlsx.TextCellValue('日期'),
+        xlsx.TextCellValue('时间'),
+        xlsx.TextCellValue('收支'),
+        xlsx.TextCellValue('金额'),
+        xlsx.TextCellValue('分类'),
+        xlsx.TextCellValue('对方/商户'),
+        xlsx.TextCellValue('标题'),
+        xlsx.TextCellValue('内容'),
+        xlsx.TextCellValue('备注'),
+        xlsx.TextCellValue('来源'),
+      ]);
+
+      for (final item in rows) {
+        final happenedAt = _parseDateTime(item['happenedAt']);
+        final amount = (item['amount'] as num?)?.toDouble() ?? 0;
+        sheet.appendRow([
+          xlsx.TextCellValue(
+            happenedAt == null ? '--' : DateFormat('yyyy-MM-dd').format(happenedAt),
+          ),
+          xlsx.TextCellValue(
+            happenedAt == null ? '--' : DateFormat('HH:mm:ss').format(happenedAt),
+          ),
+          xlsx.TextCellValue(_directionLabel(item['direction'] as String? ?? '')),
+          xlsx.DoubleCellValue(amount),
+          xlsx.TextCellValue(
+            _categoryLabel(item['category'] as String? ?? 'other'),
+          ),
+          xlsx.TextCellValue(item['counterparty'] as String? ?? ''),
+          xlsx.TextCellValue(item['sourceTitle'] as String? ?? ''),
+          xlsx.TextCellValue(item['sourceContent'] as String? ?? ''),
+          xlsx.TextCellValue(item['note'] as String? ?? ''),
+          xlsx.TextCellValue(item['sourceApp'] as String? ?? ''),
+        ]);
+      }
+
+      final bytes = workbook.encode();
+      if (bytes == null) {
+        _showMessage('导出失败：无法生成文件');
+        return;
+      }
+
+      final fileName =
+          'ririko_${DateFormat('yyyyMMdd_HHmmss').format(DateTime.now())}.xlsx';
+      await SharePlus.instance.share(
+        ShareParams(
+          title: 'Ririko 账单导出',
+          subject: 'Ririko 账单导出',
+          text: 'Ririko 账单导出',
+          files: [
+            XFile.fromData(
+              Uint8List.fromList(bytes),
+              mimeType:
+                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            ),
+          ],
+          fileNameOverrides: [fileName],
+        ),
+      );
+      _showMessage('已生成并打开导出分享：$fileName');
+    } catch (error) {
+      _showMessage('导出失败：$error');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isExporting = false;
+        });
+      }
+    }
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  String _directionLabel(String direction) {
+    switch (direction) {
+      case 'income':
+        return '收入';
+      case 'expense':
+        return '支出';
+      default:
+        return direction;
+    }
+  }
+
+  DateTime? _parseDateTime(Object? raw) {
+    if (raw == null) {
+      return null;
+    }
+    return DateTime.tryParse(raw.toString());
   }
 
   @override
@@ -508,6 +847,7 @@ class _ManualEntryResult {
     required this.amount,
     required this.direction,
     required this.title,
+    required this.content,
     required this.category,
     required this.happenedAt,
     this.counterparty,
@@ -517,6 +857,29 @@ class _ManualEntryResult {
   final double amount;
   final String direction;
   final String title;
+  final String content;
+  final String category;
+  final DateTime happenedAt;
+  final String? counterparty;
+  final String? note;
+}
+
+class _ManualEntryInitial {
+  const _ManualEntryInitial({
+    required this.amount,
+    required this.direction,
+    required this.title,
+    required this.content,
+    required this.category,
+    required this.happenedAt,
+    this.counterparty,
+    this.note,
+  });
+
+  final double amount;
+  final String direction;
+  final String title;
+  final String content;
   final String category;
   final DateTime happenedAt;
   final String? counterparty;
@@ -524,7 +887,15 @@ class _ManualEntryResult {
 }
 
 class _ManualEntrySheet extends StatefulWidget {
-  const _ManualEntrySheet();
+  const _ManualEntrySheet({
+    this.initial,
+    this.sheetTitle = '手动记一笔',
+    this.submitLabel = '保存账单',
+  });
+
+  final _ManualEntryInitial? initial;
+  final String sheetTitle;
+  final String submitLabel;
 
   @override
   State<_ManualEntrySheet> createState() => _ManualEntrySheetState();
@@ -534,6 +905,7 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
   final _formKey = GlobalKey<FormState>();
   final _amountController = TextEditingController();
   final _titleController = TextEditingController();
+  final _contentController = TextEditingController();
   final _counterpartyController = TextEditingController();
   final _noteController = TextEditingController();
 
@@ -542,9 +914,27 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
   DateTime _happenedAt = DateTime.now();
 
   @override
+  void initState() {
+    super.initState();
+    final initial = widget.initial;
+    if (initial == null) {
+      return;
+    }
+    _amountController.text = initial.amount.toStringAsFixed(2);
+    _titleController.text = initial.title;
+    _contentController.text = initial.content;
+    _counterpartyController.text = initial.counterparty ?? '';
+    _noteController.text = initial.note ?? '';
+    _direction = initial.direction;
+    _category = initial.category;
+    _happenedAt = initial.happenedAt;
+  }
+
+  @override
   void dispose() {
     _amountController.dispose();
     _titleController.dispose();
+    _contentController.dispose();
     _counterpartyController.dispose();
     _noteController.dispose();
     super.dispose();
@@ -563,7 +953,7 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(
-                '手动记一笔',
+                widget.sheetTitle,
                 style: Theme.of(context).textTheme.titleLarge,
               ),
               const SizedBox(height: 16),
@@ -610,6 +1000,16 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
                   }
                   return null;
                 },
+              ),
+              const SizedBox(height: 12),
+              TextFormField(
+                controller: _contentController,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: '内容',
+                  hintText: '例如：通知正文、支出说明等',
+                  border: OutlineInputBorder(),
+                ),
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<String>(
@@ -663,7 +1063,7 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
                 width: double.infinity,
                 child: FilledButton(
                   onPressed: _submit,
-                  child: const Text('保存账单'),
+                  child: Text(widget.submitLabel),
                 ),
               ),
             ],
@@ -713,6 +1113,7 @@ class _ManualEntrySheetState extends State<_ManualEntrySheet> {
         amount: double.parse(_amountController.text.trim()),
         direction: _direction,
         title: _titleController.text.trim(),
+        content: _contentController.text.trim(),
         category: _category,
         happenedAt: _happenedAt,
         counterparty: _counterpartyController.text.trim().isEmpty

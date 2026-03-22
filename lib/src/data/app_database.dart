@@ -117,13 +117,15 @@ class AppDatabase {
     required String title,
     required String category,
     String? counterparty,
+    String? content,
     String? note,
     DateTime? happenedAt,
   }) {
     final occurredAt = happenedAt ?? DateTime.now();
-    final content = note?.trim() ?? '';
+    final normalizedContent = (content ?? note ?? '').trim();
+    final normalizedNote = note?.trim();
     final fingerprint =
-        'manual|$direction|$amount|${occurredAt.toIso8601String()}|$title|$content';
+        'manual|$direction|$amount|${occurredAt.toIso8601String()}|$title|$normalizedContent';
 
     return _db.insert(
       'transactions',
@@ -133,10 +135,10 @@ class AppDatabase {
         'direction': direction,
         'sourceApp': sourceApp,
         'sourceTitle': title,
-        'sourceContent': content,
-        'counterparty': counterparty,
+        'sourceContent': normalizedContent,
+        'counterparty': _emptyToNull(counterparty),
         'category': category,
-        'note': content.isEmpty ? null : content,
+        'note': _emptyToNull(normalizedNote),
         'happenedAt': occurredAt.toIso8601String(),
         'createdAt': DateTime.now().toIso8601String(),
       },
@@ -149,6 +151,38 @@ class AppDatabase {
 
   Future<List<Map<String, dynamic>>> getRecentTransactions({int limit = 100}) {
     return _db.query('transactions', orderBy: 'happenedAt DESC', limit: limit);
+  }
+
+  Future<List<Map<String, dynamic>>> getAllTransactions() {
+    return _db.query('transactions', orderBy: 'happenedAt DESC');
+  }
+
+  Future<void> updateTransaction({
+    required int id,
+    required double amount,
+    required String direction,
+    required String title,
+    required String content,
+    required String category,
+    required DateTime happenedAt,
+    String? counterparty,
+    String? note,
+  }) {
+    return _db.update(
+      'transactions',
+      {
+        'amount': amount,
+        'direction': direction,
+        'sourceTitle': title,
+        'sourceContent': content.trim(),
+        'counterparty': _emptyToNull(counterparty),
+        'category': category,
+        'note': _emptyToNull(note),
+        'happenedAt': happenedAt.toIso8601String(),
+      },
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   Future<Map<String, double>> getCurrentMonthSummary() async {
@@ -177,6 +211,14 @@ class AppDatabase {
       'income': (incomeRows.first['total'] as num?)?.toDouble() ?? 0,
       'expense': (expenseRows.first['total'] as num?)?.toDouble() ?? 0,
     };
+  }
+
+  String? _emptyToNull(String? value) {
+    final normalized = value?.trim();
+    if (normalized == null || normalized.isEmpty) {
+      return null;
+    }
+    return normalized;
   }
 
   Future<void> close() => _db.close();
